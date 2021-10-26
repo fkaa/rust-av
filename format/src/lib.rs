@@ -1,3 +1,4 @@
+#![feature(range_bounds_assert_len)]
 // crates
 #[macro_use]
 extern crate log;

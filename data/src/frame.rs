@@ -454,6 +454,7 @@ fn copy_plane(
     let dst_chunks = dst.chunks_mut(dst_linesize);
     let src_chunks = src.chunks(src_linesize);
 
+
     for (d, s) in dst_chunks.zip(src_chunks).take(h) {
         unsafe {
             copy_nonoverlapping(s.as_ptr(), d.as_mut_ptr(), w);

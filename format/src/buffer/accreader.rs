@@ -66,10 +66,12 @@ impl<R: Read + Seek> AccReader<R> {
             self.end
         );
         if self.end - self.pos > 0 {
-            for i in 0..(self.end - self.pos) {
+            trace!("copying {} to beginning of buffer", self.end-self.pos);
+            self.buf.copy_within(self.pos..self.end, 0);
+            /*for i in 0..(self.end - self.pos) {
                 trace!("buf[{}] = buf[{}]", i, self.pos + i);
                 self.buf[i] = self.buf[self.pos + i];
-            }
+            }*/
         }
         self.end -= self.pos;
         self.pos = 0;
@@ -118,10 +120,14 @@ impl<R: Read + Seek> Read for AccReader<R> {
             // (larger than our internal buffer), bypass our internal buffer
             // entirely.
             if buf.len() > self.buf.len() {
+                trace!("going to inner.. pos={},end={}", self.pos, self.end);
                 match (&self.buf[self.pos..self.end]).read(buf) {
                     Ok(len) => {
-                        self.consume(len);
-                        self.inner.read(&mut buf[self.end..])
+                        let total_len = self.inner.read(&mut buf[(self.end - self.pos)..])? + len;
+                        trace!("consuming {} in inner", total_len);
+                        self.consume(total_len);
+                        self.reset_buffer_position();
+                        Ok(total_len)
                     }
                     Err(e) => Err(e),
                 }
@@ -130,6 +136,7 @@ impl<R: Read + Seek> Read for AccReader<R> {
                     let mut rem = self.fill_buf()?;
                     rem.read(buf)?
                 };
+                trace!("buffer is small enough, nread={}", nread);
                 self.consume(nread);
                 Ok(nread)
             }
@@ -158,12 +165,13 @@ impl<R: Read + Seek> BufRead for AccReader<R> {
     fn consume(&mut self, amt: usize) {
         trace!("consumed {} bytes", amt);
         self.pos = cmp::min(self.pos + amt, self.end);
+        //self.pos += amt;
         self.index += amt;
     }
 }
 
 impl<R: Read + Seek> Seek for AccReader<R> {
-    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+    fn seek(&mut self, mut pos: SeekFrom) -> Result<u64> {
         match pos {
             SeekFrom::Start(sz) => {
                 let mv = sz as usize;
@@ -176,13 +184,20 @@ impl<R: Read + Seek> Seek for AccReader<R> {
             }
             SeekFrom::End(_) => {}
             SeekFrom::Current(sz) => {
-                if sz >= 0 && sz as usize <= self.end - self.pos {
-                    self.index = sz as usize;
-                    self.pos += sz as usize;
-                    return Ok(sz as u64);
+                let remaining = self.end - self.pos;
+
+                if sz >= 0 {
+                    if sz as usize <= remaining {
+                        self.index += sz as usize;
+                        self.pos += sz as usize;
+                        return Ok(self.index as u64);
+                    } else {
+                        pos = SeekFrom::Current(sz - remaining as i64);
+                    }
                 }
             }
         };
+
 
         match self.inner.seek(pos) {
             Ok(sz) => {
@@ -210,15 +225,80 @@ mod tests {
     use super::*;
     use crate::buffer::Buffered;
     use std::io::{BufRead, Cursor};
+    use std::ops::Range;
+
+    fn assert_read_acc(bytes: &[u8], capacity: usize, ranges: &[Range<usize>]) {
+        let c = Cursor::new(&bytes[..]);
+        let mut vec = vec![0u8; bytes.len()];
+        let mut acc = AccReader::with_capacity(capacity, c);
+
+        for r in ranges {
+            acc.read_exact(&mut vec[r.clone()]).unwrap();
+        }
+
+        assert_eq!(bytes, &vec);
+    }
 
     #[test]
-    fn acc_reader_test() {
+    fn read_same_capacity_full_read() {
+        let buf = (0u8..).take(20).collect::<Vec<u8>>();
+
+        assert_read_acc(&buf, 20, &[0..buf.len()]);
+    }
+
+    #[test]
+    fn read_split_read_1() {
+        let buf = (0u8..).take(31).collect::<Vec<u8>>();
+
+        assert_read_acc(
+            &buf,
+            20,
+            &[
+                0..10,
+                10..buf.len()
+            ]
+        );
+    }
+
+    #[test]
+    fn read_split_read_2() {
+        let buf = (0u8..).take(31).collect::<Vec<u8>>();
+
+        assert_read_acc(
+            &buf,
+            20,
+            &[
+                0..3,
+                3..buf.len()
+            ]
+        );
+    }
+
+    #[test]
+    fn reader_test() {
         let buf = b"AAAA\nAAAB\nAAACAAADAAAEAAAF\ndabcdEEEE";
         let c = Cursor::new(&buf[..]);
 
         let acc = AccReader::with_capacity(20, c);
 
         assert_eq!(4, acc.lines().count());
+
+
+        /*let c = Cursor::new(&buf[..]);
+        let mut vec = vec![0u8; buf.len()];
+        let mut acc = AccReader::with_capacity(2, c);
+        acc.read_exact(&mut vec).unwrap();
+
+        assert_eq!(&vec, buf);
+
+        let c = Cursor::new(&buf[..]);
+        let mut vec = vec![0u8; buf.len()];
+        let mut acc = AccReader::with_capacity(2, c);
+        acc.read_exact(&mut vec[..3]).unwrap();
+        acc.read_exact(&mut vec[3..]).unwrap();
+
+        assert_eq!(&vec, buf);*/
+
     }
 
     #[test]
